@@ -1,0 +1,23 @@
+{
+  "name": "perxia-verify-backend",
+  "version": "1.0.0",
+  "description": "Backend para portal de gestión de contratos con IA",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "process-docs": "node scripts/processDocuments.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "better-sqlite3": "^11.7.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1",
+    "openai": "^6.33.0",
+    "pdf-parse": "^1.1.1",
+    "pdf-to-img": "^5.0.0"
+  }
+}
