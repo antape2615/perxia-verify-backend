@@ -1,26 +1,25 @@
 services:
   - type: web
     name: perxia-verify-api
-    runtime: docker
-    repo: https://github.com/angietatianap26/perxia-verify-backend
-    plan: starter
+    runtime: node
+    buildCommand: npm ci
+    startCommand: node server.js
+    plan: free
     healthCheckPath: /api/stats
     envVars:
+      - key: NODE_VERSION
+        value: "20"
       - key: PORT
-        value: 10000
+        value: "10000"
       - key: AZURE_OPENAI_ENDPOINT
-        sync: false
+        value: https://openaiperiferiatest.openai.azure.com/
       - key: AZURE_OPENAI_DEPLOYMENT
-        sync: false
+        value: openAIJack
       - key: AZURE_OPENAI_API_VERSION
-        sync: false
+        value: 2025-01-01-preview
       - key: AZURE_OPENAI_API_KEY
         sync: false
       - key: CORS_ORIGINS
         value: https://perxia-verify.netlify.app
       - key: CONTRACTS_PATH
-        value: /app/Contratos
-    disk:
-      name: perxia-data
-      mountPath: /data
-      sizeGB: 1
+        value: ./Contratos
