@@ -2,6 +2,10 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
+import fs from 'fs';
+import { createWriteStream } from 'fs';
+import { pipeline } from 'stream/promises';
+import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { getDb, closeDb } from './database.js';
 import {
@@ -43,6 +47,147 @@ getDb();
 app.get('/api/stats', (req, res) => {
   try { res.json(getStats()); }
   catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- Pending Analysis ---
+app.get('/api/pending-analysis', (req, res) => {
+  try {
+    const db = getDb();
+
+    const pending = db.prepare(
+      `SELECT id, file_name, folder, doc_type, main_category, client_name, status
+       FROM documents WHERE status = 'pending' ORDER BY main_category, client_name, file_name`
+    ).all();
+
+    const noText = db.prepare(
+      `SELECT id, file_name, folder, doc_type, main_category, client_name, status, summary
+       FROM documents WHERE status = 'no_text' ORDER BY main_category, client_name, file_name`
+    ).all();
+
+    const errors = db.prepare(
+      `SELECT id, file_name, folder, doc_type, main_category, client_name, status, summary
+       FROM documents WHERE status = 'error' ORDER BY main_category, client_name, file_name`
+    ).all();
+
+    const passwordProtected = noText.filter(d =>
+      d.summary && (/protegido|password|contraseña|encrypted/i.test(d.summary))
+    );
+    const noTextOther = noText.filter(d =>
+      !d.summary || !(/protegido|password|contraseña|encrypted/i.test(d.summary))
+    );
+
+    // Also check processed docs that were marked as password-protected
+    const processedPassword = db.prepare(
+      `SELECT id, file_name, folder, doc_type, main_category, client_name, status, summary
+       FROM documents WHERE status = 'processed'
+       AND (summary LIKE '%protegido%' OR summary LIKE '%password%' OR summary LIKE '%contraseña%')
+       ORDER BY main_category, client_name, file_name`
+    ).all();
+
+    const allPasswordDocs = [...passwordProtected, ...processedPassword];
+
+    // Group pending by category
+    const pendingByCategory = {};
+    pending.forEach(d => {
+      const cat = d.main_category || 'Sin categoría';
+      if (!pendingByCategory[cat]) pendingByCategory[cat] = [];
+      pendingByCategory[cat].push(d);
+    });
+
+    res.json({
+      summary: {
+        pending: pending.length,
+        noText: noText.length,
+        errors: errors.length,
+        passwordProtected: allPasswordDocs.length,
+        noTextOther: noTextOther.length,
+      },
+      pending,
+      pendingByCategory,
+      passwordProtected: allPasswordDocs,
+      noTextOther,
+      errors,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- Download original PDF ---
+app.get('/api/documents/:id/download', (req, res) => {
+  try {
+    const db = getDb();
+    const doc = db.prepare('SELECT file_path, file_name FROM documents WHERE id = ?').get(Number(req.params.id));
+    if (!doc) return res.status(404).json({ error: 'Documento no encontrado' });
+
+    const absolutePath = path.resolve(doc.file_path);
+    if (!fs.existsSync(absolutePath)) {
+      return res.status(404).json({ error: 'Archivo no encontrado en disco' });
+    }
+    res.download(absolutePath, doc.file_name);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- Download ZIP of documents by filter ---
+app.get('/api/documents/download-zip', (req, res) => {
+  try {
+    const db = getDb();
+    const { status, ids } = req.query;
+
+    let docs;
+    if (ids) {
+      const idList = ids.split(',').map(Number).filter(n => !isNaN(n));
+      docs = db.prepare(`SELECT id, file_path, file_name, main_category, client_name FROM documents WHERE id IN (${idList.map(() => '?').join(',')})`).all(...idList);
+    } else if (status) {
+      docs = db.prepare('SELECT id, file_path, file_name, main_category, client_name FROM documents WHERE status = ?').all(status);
+    } else {
+      return res.status(400).json({ error: 'Se requiere parámetro status o ids' });
+    }
+
+    const existingDocs = docs.filter(d => fs.existsSync(path.resolve(d.file_path)));
+    if (existingDocs.length === 0) return res.status(404).json({ error: 'No se encontraron archivos' });
+
+    const tmpDir = path.join('/tmp', `perxia-zip-${Date.now()}`);
+    fs.mkdirSync(tmpDir, { recursive: true });
+
+    for (const d of existingDocs) {
+      const subfolder = (d.client_name || d.main_category || 'otros').replace(/[/\\:*?"<>|]/g, '_');
+      const destDir = path.join(tmpDir, subfolder);
+      fs.mkdirSync(destDir, { recursive: true });
+      fs.copyFileSync(path.resolve(d.file_path), path.join(destDir, d.file_name));
+    }
+
+    const zipPath = `${tmpDir}.zip`;
+    execSync(`cd "${tmpDir}" && zip -r "${zipPath}" . -q`);
+
+    const label = status || 'seleccion';
+    res.setHeader('Content-Disposition', `attachment; filename="documentos_${label}_${existingDocs.length}.zip"`);
+    res.setHeader('Content-Type', 'application/zip');
+
+    const stream = fs.createReadStream(zipPath);
+    stream.pipe(res);
+    stream.on('end', () => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(zipPath, { force: true });
+    });
+  } catch (e) {
+    console.error('Error creando ZIP:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// --- Export all documents ---
+app.get('/api/export', (req, res) => {
+  try {
+    const db = getDb();
+    const docs = db.prepare(
+      `SELECT id, file_name, folder, doc_type, main_category, client_name,
+              client, contract_number, contract_type, start_date, end_date,
+              value, currency, terms, agreements, parties, obligations,
+              penalties, guarantees, scope, payment_terms, renewal_clause,
+              termination_clause, summary, status, processed_at
+       FROM documents ORDER BY main_category, client_name, file_name`
+    ).all();
+    res.json(docs);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // --- Category & Client breakdowns ---
